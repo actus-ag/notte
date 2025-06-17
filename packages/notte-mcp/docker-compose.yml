@@ -1,0 +1,15 @@
+services:
+  notte-mcp:
+    build: .
+    ports:
+      - "25645:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+    env_file:
+      - .env
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

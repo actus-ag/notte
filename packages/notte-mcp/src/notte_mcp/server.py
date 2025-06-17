@@ -4,7 +4,8 @@ from collections.abc import Sequence
 from typing import Annotated
 
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP, Image
+from fastmcp import FastMCP
+from fastmcp.utilities.types import Image
 from notte_sdk import NotteClient, __version__
 from notte_sdk.endpoints.sessions import RemoteSession
 from notte_sdk.types import ObserveResponse, ScrapeResponse, SessionResponse, StepResponse
@@ -23,9 +24,8 @@ notte = NotteClient(api_key=os.getenv("NOTTE_API_KEY"))
 # Create an MCP server
 mcp = FastMCP(
     name="Notte MCP Server for Notte Browser Sessions and Web Agents Operators",
-    request_timeout=MAX_AGENT_WAIT_TIME,
     # TOOD: coment out this line for local testing
-    dependencies=[f"notte-sdk=={__version__}", "mcp[cli]>=1.6.0"],
+    dependencies=[f"notte-sdk=={__version__}", "fastmcp"],
 )
 
 
@@ -164,5 +164,6 @@ def notte_operator(
 
 
 if __name__ == "__main__":
-    # mcp.run(transport="sse")
-    mcp.run(transport="stdio")
+    host = os.getenv("HOST", "localhost")
+    port = int(os.getenv("PORT", 8000))
+    mcp.run(transport="streamable-http", host=host, port=port)

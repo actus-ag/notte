@@ -11,11 +11,11 @@ packages = [
 ]
 
 
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
-    "python-dotenv>=1.0.1",
-    "mcp[cli]>=1.6.0",
-    "notte-sdk==1.4.4.dev",
+    "notte-sdk",
+    "fastmcp",
+    "python-dotenv>=1.1.0",
 ]
 
 
