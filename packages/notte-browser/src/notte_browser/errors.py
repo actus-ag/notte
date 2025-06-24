@@ -3,12 +3,37 @@ from functools import wraps
 from typing import Any, Callable, TypeVar
 
 from loguru import logger
+from notte_core.common.config import config
 from notte_core.errors.base import NotteBaseError, NotteTimeoutError
 from notte_core.errors.processing import InvalidInternalCheckError
-from patchright.async_api import Error as PlayrightError
-from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+from patchright.async_api import Error as _PatchrightError
+from patchright.async_api import TimeoutError as _PatchrightTimeoutError
 
 T = TypeVar("T")
+
+
+def getPlaywrightOrPatchrightTimeoutError() -> (
+    tuple[type[_PatchrightTimeoutError], type[Exception]] | type[_PatchrightTimeoutError]
+):
+    try:
+        from playwright.async_api import TimeoutError as _PlaywrightTimeoutError
+
+        return _PatchrightTimeoutError, _PlaywrightTimeoutError
+    except ImportError:
+        return _PatchrightTimeoutError
+
+
+def getPlaywrightOrPatchrightError() -> tuple[type[_PatchrightError], type[Exception]] | type[_PatchrightError]:
+    try:
+        from playwright.async_api import Error as _PlaywrightError
+
+        return _PatchrightError, _PlaywrightError
+    except ImportError:
+        return _PatchrightError
+
+
+PlaywrightTimeoutError = getPlaywrightOrPatchrightTimeoutError()
+PlaywrightError = getPlaywrightOrPatchrightError()
 
 # #######################################################
 # #################### Browser errors ###################
@@ -62,6 +87,15 @@ class BrowserNotStartedError(BrowserError):
             user_message="Session not started. Please start a new session to continue.",
             agent_message="Browser not started. Terminate the current session and start a new one.",
             should_retry_later=False,
+        )
+
+
+class CdpConnectionError(BrowserError):
+    def __init__(self, cdp_url: str) -> None:
+        super().__init__(
+            dev_message=f"Failed to connect to CDP: {cdp_url}. Check if the CDP URL is valid.",
+            user_message=f"Failed to connect to CDP: {cdp_url}. Check if the CDP URL is valid.",
+            agent_message=f"Failed to connect to CDP: {cdp_url}. Check if the CDP URL is valid.",
         )
 
 
@@ -217,7 +251,7 @@ class PlaywrightRuntimeError(NotteBaseError):
         )
 
 
-def capture_playwright_errors(verbose: bool = False):
+def capture_playwright_errors():
     """Decorator to handle playwright errors.
 
     Args:
@@ -231,7 +265,7 @@ def capture_playwright_errors(verbose: bool = False):
                 return await func(*args, **kwargs)
             except NotteBaseError as e:
                 # Already our error type, just log and re-raise
-                logger.error(f"NotteBaseError: {e.dev_message if verbose else e.user_message}")
+                logger.error(f"NotteBaseError: {e.dev_message if config.verbose else e.user_message}")
                 raise e
             except PlaywrightTimeoutError as e:
                 # only timeout issue if the last line is it
@@ -242,7 +276,7 @@ def capture_playwright_errors(verbose: bool = False):
             except TimeoutError as e:
                 raise NotteTimeoutError(message="Request timed out.") from e
             # Add more except blocks for other external errors
-            except PlayrightError as e:
+            except PlaywrightError as e:
                 raise NotteBaseError(
                     dev_message=f"Unexpected playwright error: {str(e)}",
                     user_message="An unexpected error occurred. Our team has been notified.",
@@ -252,7 +286,7 @@ def capture_playwright_errors(verbose: bool = False):
                 # Catch-all for unexpected errors
                 logger.error(
                     f"Unexpected error occurred. Please use the NotteBaseError class to handle this error. {str(e)}",
-                    exc_info=verbose,
+                    exc_info=config.verbose,
                 )
                 raise NotteBaseError(
                     dev_message=f"Unexpected error: {str(e)}",

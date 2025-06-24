@@ -20,6 +20,7 @@ from notte_core.common.resource import AsyncResource, SyncResource
 from notte_core.common.telemetry import capture_event, track_usage
 from notte_core.data.space import DataSpace
 from notte_core.llms.service import LLMService
+from notte_core.profiling import profiler
 from notte_core.space import ActionSpace
 from notte_core.utils.webp_replay import ScreenshotReplay, WebpReplay
 from notte_sdk.types import (
@@ -50,7 +51,7 @@ from notte_browser.window import BrowserWindow, BrowserWindowOptions
 enable_nest_asyncio()
 
 
-class TrajectoryStep(BaseModel):
+class SessionTrajectoryStep(BaseModel):
     obs: Observation
     action: BaseAction
 
@@ -76,7 +77,7 @@ class NotteSession(AsyncResource, SyncResource):
         self._data_scraping_pipe: DataScrapingPipe = DataScrapingPipe(llmserve=llmserve, type=config.scraping_type)
         self._action_selection_pipe: ActionSelectionPipe = ActionSelectionPipe(llmserve=llmserve)
 
-        self.trajectory: list[TrajectoryStep] = []
+        self.trajectory: list[SessionTrajectoryStep] = []
         self._snapshot: BrowserSnapshot | None = None
         self._action: BaseAction | None = None
         self._scraped_data: DataSpace | None = None
@@ -160,7 +161,7 @@ class NotteSession(AsyncResource, SyncResource):
         return actions
 
     @property
-    def last_step(self) -> TrajectoryStep:
+    def last_step(self) -> SessionTrajectoryStep:
         if len(self.trajectory) <= 0:
             raise NoSnapshotObservedError()
         return self.trajectory[-1]
@@ -210,6 +211,7 @@ class NotteSession(AsyncResource, SyncResource):
 
     @timeit("observe")
     @track_usage("page.observe")
+    @profiler.profiled()
     async def aobserve(
         self,
         url: str | None = None,
@@ -267,7 +269,7 @@ class NotteSession(AsyncResource, SyncResource):
 
         obs = Observation.from_snapshot(self._snapshot, space=space, data=data)
         # final step is to add obs, action pair to the trajectory and trigger the callback
-        self.trajectory.append(TrajectoryStep(obs=obs, action=self.action))
+        self.trajectory.append(SessionTrajectoryStep(obs=obs, action=self.action))
         if self.act_callback is not None:
             self.act_callback(self.action, obs)
         return obs
@@ -287,6 +289,7 @@ class NotteSession(AsyncResource, SyncResource):
 
     @timeit("step")
     @track_usage("page.step")
+    @profiler.profiled()
     async def astep(self, action: BaseAction | None = None, **data: Unpack[StepRequestDict]) -> StepResult:  # pyright: ignore[reportGeneralTypeIssues]
         # --------------------------------
         # ---- Step 0: action parsing ----
@@ -335,6 +338,7 @@ class NotteSession(AsyncResource, SyncResource):
 
     @timeit("scrape")
     @track_usage("page.scrape")
+    @profiler.profiled()
     async def ascrape(
         self,
         url: str | None = None,

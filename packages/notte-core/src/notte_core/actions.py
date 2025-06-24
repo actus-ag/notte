@@ -87,10 +87,6 @@ class BaseAction(BaseModel, metaclass=ABCMeta):
 
     ACTION_REGISTRY: ClassVar[dict[str, typeAlias["BaseAction"]]] = {}
 
-    @staticmethod
-    def validate_type(action_type: str) -> bool:
-        return action_type in BaseAction.ACTION_REGISTRY
-
     def __init_subclass__(cls, **kwargs: dict[Any, Any]):
         super().__init_subclass__(**kwargs)  # type: ignore
 
@@ -190,6 +186,50 @@ class BrowserAction(BaseAction, metaclass=ABCMeta):
         return action_cls.model_validate(action_params)
 
 
+class FormFillAction(BrowserAction):
+    type: Literal["form_fill"] = "form_fill"  # pyright: ignore [reportIncompatibleVariableOverride]
+    description: str = "Fill a form with multiple values. Critical: If you detect a form on a page, try to use this action, and otherwise use the regular fill action"
+    value: dict[
+        Literal[
+            "title",
+            "first_name",
+            "middle_name",
+            "last_name",
+            "email",
+            "company",
+            "address1",
+            "address2",
+            "address3",
+            "city",
+            "state",
+            "postal_code",
+            "country",
+            "phone",
+        ],
+        str | ValueWithPlaceholder,
+    ]
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def verify_value(cls, value: Any) -> Any:
+        """Validator necessary to ignore typing issues with ValueWithPlaceholder"""
+        return value
+
+    @override
+    def execution_message(self) -> str:
+        return f"Filled the form with the value(s): '{self.value}'"
+
+    @override
+    @staticmethod
+    def example() -> "FormFillAction":
+        return FormFillAction(value={"email": "hello@example.com", "first_name": "Johnny", "last_name": "Smith"})
+
+    @property
+    @override
+    def param(self) -> ActionParameter | None:
+        return ActionParameter(name="value", type="dict")
+
+
 class GotoAction(BrowserAction):
     type: Literal["goto"] = "goto"  # pyright: ignore [reportIncompatibleVariableOverride]
     description: str = "Goto to a URL (in current tab)"
@@ -273,7 +313,17 @@ class ScrapeAction(BrowserAction):
 
     @override
     def execution_message(self) -> str:
-        return "Scraped the current page data in text format"
+        if self.only_main_content:
+            content = "main content of the current page"
+        else:
+            content = "current page"
+
+        if self.instructions:
+            instructions = f" with instructions '{self.instructions}'"
+        else:
+            instructions = ""
+
+        return f"Scraped the {content} in text format{instructions}"
 
     @override
     @staticmethod
@@ -436,6 +486,7 @@ class CaptchaSolveAction(BrowserAction):
             "hcaptcha",
             "image",
             "text",
+            "auth0",
             "cloudflare",
             "datadome",
             "human challenge",
@@ -500,6 +551,40 @@ class HelpAction(BrowserAction):
         return ActionParameter(name="reason", type="str")
 
 
+class SolveCaptchaAction(BrowserAction):
+    type: Literal["solve_captcha"] = "solve_captcha"  # pyright: ignore [reportIncompatibleVariableOverride]
+    description: str = "Solve a captcha. IMPORTANT: always use this action if you notice a captcha that needs to be solved on the current page. Try to resolve the captcha type to the best of your ability, but return unknown if you can't"
+    captcha_type: Literal[
+        "recaptcha",
+        "cloudflare_embed",
+        "cloudflare_fullpage",
+        "perimeterx",
+        "human_security",
+        "akamai",
+        "datadome",
+        "imperva",
+        "aws_waf",
+        "kasada",
+        "geetest",
+        "funcaptcha",
+        "unknown",
+    ]
+
+    @override
+    def execution_message(self) -> str:
+        return "Solved captcha"
+
+    @override
+    @staticmethod
+    def example() -> "SolveCaptchaAction":
+        return SolveCaptchaAction(captcha_type="cloudflare_fullpage")
+
+    @property
+    @override
+    def param(self) -> ActionParameter | None:
+        return None
+
+
 class CompletionAction(BrowserAction):
     type: Literal["completion"] = "completion"  # pyright: ignore [reportIncompatibleVariableOverride]
     description: str = "Complete the task by returning the answer and terminate the browser session"
@@ -536,6 +621,13 @@ class InteractionAction(BaseAction, metaclass=ABCMeta):
 
     INTERACTION_ACTION_REGISTRY: ClassVar[dict[str, typeAlias["InteractionAction"]]] = {}
 
+    @field_validator("id", mode="before")
+    @classmethod
+    def cleanup_id(cls, value: str) -> str:
+        if value.endswith("[:]"):
+            return value[:-3]
+        return value
+
     def __init_subclass__(cls, **kwargs: dict[Any, Any]):
         super().__init_subclass__(**kwargs)
 
@@ -544,6 +636,34 @@ class InteractionAction(BaseAction, metaclass=ABCMeta):
             if name in cls.INTERACTION_ACTION_REGISTRY:
                 raise ValueError(f"Base Action {name} is duplicated")
             cls.INTERACTION_ACTION_REGISTRY[name] = cls
+
+    @staticmethod
+    def from_param(
+        action_type: str, value: bool | str | int | None = None, selector: str | None = None
+    ) -> "InteractionAction":
+        action_cls = InteractionAction.INTERACTION_ACTION_REGISTRY.get(action_type)
+        if action_cls is None:
+            raise ValueError(f"Invalid action type: {action_type}")
+
+        action_params: dict[str, Any] = {"id": ""}
+        if value is not None:
+            action_params["value"] = value
+
+        action = action_cls.model_validate(action_params)
+
+        # have to assume simple playwright selector in this case
+        # could maybe dispatch?
+        if selector is not None:
+            action.selector = NodeSelectors(
+                playwright_selector=selector,
+                css_selector="",
+                xpath_selector="",
+                notte_selector="",
+                in_iframe=False,
+                in_shadow_root=False,
+                iframe_parent_css_selectors=[],
+            )
+        return action
 
 
 class ClickAction(InteractionAction):

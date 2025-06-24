@@ -15,22 +15,26 @@ from typing_extensions import final, override
 
 from notte_sdk.endpoints.base import BaseClient, NotteEndpoint
 from notte_sdk.endpoints.sessions import RemoteSession, get_context_session_id
-from notte_sdk.endpoints.vaults import NotteVault, get_context_vault_id
+from notte_sdk.endpoints.vaults import NotteVault
 from notte_sdk.types import (
     DEFAULT_MAX_NB_STEPS,
-    AgentCreateRequest,
     AgentCreateRequestDict,
     AgentListRequest,
     AgentListRequestDict,
     AgentResponse,
+    AgentRunRequest,
     AgentRunRequestDict,
-    AgentStartRequest,
     AgentStartRequestDict,
     AgentStatus,
     AgentStatusRequest,
+    _AgentCreateRequest,  # pyright: ignore[reportPrivateUsage]
     render_agent_status,
 )
 from notte_sdk.types import AgentStatusResponse as _AgentStatusResponse
+
+
+class _AgentStartRequest(_AgentCreateRequest, AgentRunRequest):
+    pass
 
 
 # proxy for: StepAgentOutput
@@ -43,12 +47,18 @@ class AgentStepResponse(BaseModel):
         actions = self.actions
         for action in actions:
             action_str += f"   ▶ {action}"
+
+        interaction_str = ""
+        for interaction in self.state.get("relevant_interactions", []):
+            interaction_str += f"\n   ▶ {interaction.get('id')}: {interaction.get('reason')}"
+
         return render_agent_status(
             status=self.state.get("previous_goal_status", "no agent status"),
             summary=self.state.get("page_summary", "no page summary"),
             goal_eval=self.state.get("previous_goal_eval", "no goal eval"),
             next_goal=self.state.get("next_goal", "no next goal"),
             memory=self.state.get("memory", "no memory"),
+            interaction_str=interaction_str,
             action_str=action_str,
             colors=colors,
         )
@@ -213,15 +223,8 @@ class AgentsClient(BaseClient):
         Returns:
             AgentResponse: The response obtained from the agent run request.
         """
-        request = AgentStartRequest.model_validate(data)
+        request = _AgentStartRequest.model_validate(data)
         response = self.request(AgentsClient.agent_start_endpoint().with_request(request))
-        return response
-
-    def start_custom(self, request: BaseModel) -> AgentResponse:
-        """
-        Start an agent with the specified request parameters.
-        """
-        response = self.request(AgentsClient.agent_start_custom_endpoint().with_request(request))
         return response
 
     def wait(
@@ -269,7 +272,7 @@ class AgentsClient(BaseClient):
 
         raise TimeoutError("Agent did not complete in time")
 
-    async def watch_logs(self, agent_id: str, max_steps: int) -> None:
+    async def watch_logs(self, agent_id: str, max_steps: int) -> AgentStatusResponse | None:
         """
         Watch the logs of the specified agent.
         """
@@ -277,7 +280,7 @@ class AgentsClient(BaseClient):
         wss_url = self.request_path(endpoint).format(agent_id=agent_id, token=self.token)
         wss_url = wss_url.replace("https://", "wss://").replace("http://", "ws://")
 
-        async def get_messages():
+        async def get_messages() -> AgentStatusResponse | None:
             counter = 0
             async with websockets.client.connect(
                 uri=wss_url,
@@ -289,23 +292,27 @@ class AgentsClient(BaseClient):
                     async for message in websocket:
                         assert isinstance(message, str), f"Expected str, got {type(message)}"
                         try:
+                            if agent_id in message and "agent_id" in message:
+                                # termination condition
+                                return AgentStatusResponse.model_validate_json(message)
                             response = AgentStepResponse.model_validate_json(message)
                             response.log_pretty_string()
                             counter += 1
                         except Exception as e:
                             if "error" in message:
                                 logger.error(f"Error in agent logs: {message}")
+                            elif agent_id in message and "agent_id" in message:
+                                logger.error(f"Error parsing AgentStatusResponse for message: {message}: {e}")
                             else:
-                                logger.error(f"Error parsing agent logs: {e}")
+                                logger.error(f"Error parsing agent logs for message: {message}: {e}")
                             continue
 
                         if response.is_done():
                             logger.info(f"Agent {agent_id} completed in {counter} steps")
-                            break
 
                         if counter >= max_steps:
                             logger.info(f"Agent reached max steps: {max_steps}")
-                            break
+
                 except ConnectionError as e:
                     logger.error(f"Connection error: {e}")
                     return
@@ -313,7 +320,7 @@ class AgentsClient(BaseClient):
                     logger.error(f"Error: {e}")
                     return
 
-        _ = await get_messages()
+        return await get_messages()
 
     async def watch_logs_and_wait(self, agent_id: str, max_steps: int) -> AgentStatusResponse:
         """
@@ -329,7 +336,9 @@ class AgentsClient(BaseClient):
         Returns:
             AgentResponse: The response from the completed agent execution.
         """
-        _ = await self.watch_logs(agent_id=agent_id, max_steps=max_steps)
+        response = await self.watch_logs(agent_id=agent_id, max_steps=max_steps)
+        if response is not None:
+            return response
         # Wait max 9 seconds for the agent to complete
         TOTAL_WAIT_TIME, ITERATIONS = 9, 3
         for _ in range(ITERATIONS):
@@ -384,17 +393,6 @@ class AgentsClient(BaseClient):
         # wait for completion
         max_steps: int = data.get("max_steps", DEFAULT_MAX_NB_STEPS)
         return await self.watch_logs_and_wait(agent_id=response.agent_id, max_steps=max_steps)
-
-    def run_custom(self, request: BaseModel) -> AgentStatusResponse:
-        """
-        Run an agent with the specified request parameters.
-        and wait for completion
-        """
-        if not self.is_custom_endpoint_available():
-            raise ValueError(f"Custom endpoint is not available for this server: {self.server_url}")
-        response = self.start_custom(request)
-        max_steps = request.model_dump().get("max_steps", max(DEFAULT_MAX_NB_STEPS, 50))
-        return asyncio.run(self.watch_logs_and_wait(agent_id=response.agent_id, max_steps=max_steps))
 
     def status(self, agent_id: str) -> AgentStatusResponse:
         """
@@ -468,7 +466,7 @@ class RemoteAgent:
     def __init__(
         self,
         client: AgentsClient,
-        request: AgentCreateRequest,
+        request: _AgentCreateRequest,
         headless: bool,
         open_viewer: Callable[[str], None],
         session: RemoteSession | None = None,
@@ -482,7 +480,7 @@ class RemoteAgent:
         """
         self.headless: bool = headless
         self.open_viewer: Callable[[str], None] = open_viewer
-        self.request: AgentCreateRequest = request
+        self.request: _AgentCreateRequest = request
         self.client: AgentsClient = client
         self.response: AgentResponse | None = None
 
@@ -511,23 +509,13 @@ class RemoteAgent:
             self.open_viewer(self.response.session_id)
         return self.response
 
-    def start_custom(self, request: BaseModel) -> AgentResponse:
-        """
-        Start the agent with the specified request parameters.
-        """
-        self.response = self.client.start_custom(request)
-        if not self.headless:
-            # start viewer
-            self.open_viewer(self.response.session_id)
-        return self.response
-
     def wait(self) -> AgentStatusResponse:
         """
         Wait for the agent to complete.
         """
         return self.client.wait(agent_id=self.agent_id)
 
-    async def watch_logs(self) -> None:
+    async def watch_logs(self) -> AgentStatusResponse | None:
         """
         Watch the logs of the agent.
         """
@@ -580,12 +568,28 @@ class RemoteAgent:
         logger.info(f"[Agent] {self.agent_id} started with model: {self.request.reasoning_model}")
         return await self.watch_logs_and_wait()
 
+    def start_custom(self, request: BaseModel) -> AgentResponse:
+        """
+        Start a custom agent with the specified request parameters.
+        """
+        if not self.client.is_custom_endpoint_available():
+            raise ValueError(f"Custom endpoint is not available for this server: {self.client.server_url}")
+        self.response = self.client.request(AgentsClient.agent_start_custom_endpoint().with_request(request))
+        logger.info(f"[Custom Agent] {self.agent_id} started...")
+        return self.response
+
     def run_custom(self, request: BaseModel) -> AgentStatusResponse:
         """
-        Run an agent with the specified request parameters.
+        Run an custom agent with the specified request parameters.
         and wait for completion
+
+        Note: not all servers support custom agents.
         """
-        return self.client.run_custom(request)
+        response = self.start_custom(request)
+        if not self.headless:
+            # start viewer
+            self.open_viewer(response.session_id)
+        return asyncio.run(self.watch_logs_and_wait())
 
     def status(self) -> AgentStatusResponse:
         """
@@ -642,7 +646,6 @@ class RemoteAgentFactory:
         notifier: BaseNotifier | None = None,
         session: RemoteSession | None = None,
         raise_on_existing_contextual_session: bool = True,
-        raise_on_existing_contextual_vault: bool = True,
         **data: Unpack[AgentCreateRequestDict],
     ) -> RemoteAgent:
         """
@@ -659,7 +662,7 @@ class RemoteAgentFactory:
         Returns:
             RemoteAgent: A new RemoteAgent instance configured with the specified parameters.
         """
-        request = AgentCreateRequest.model_validate(data)
+        request = _AgentCreateRequest.model_validate(data)
         if notifier is not None:
             notifier_config = notifier.model_dump()
             request.notifier_config = notifier_config
@@ -667,18 +670,6 @@ class RemoteAgentFactory:
         # #########################################################
         # ###################### Vault checks #####################
         # #########################################################
-
-        if vault is None:
-            vault_id = get_context_vault_id()
-            if vault_id is not None:
-                error_msg = (
-                    f"[Vault] {vault_id} was found in the context but was not provided to the agent. "
-                    "This is unexpected. If you meant to use this vault inside the agent, use `notte.Agent(..., vault=vault)` instead."
-                    " Otherwise, you can silence this error by setting `notte.Agent(..., raise_on_existing_contextual_vault=False)`."
-                )
-                if raise_on_existing_contextual_vault:
-                    raise ValueError(error_msg)
-                logger.warning(error_msg)
 
         if vault is not None:
             if len(vault.vault_id) == 0:

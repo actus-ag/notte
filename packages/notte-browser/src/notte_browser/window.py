@@ -15,6 +15,7 @@ from notte_core.browser.snapshot import (
 )
 from notte_core.common.config import BrowserType, PlaywrightProxySettings, config
 from notte_core.errors.processing import SnapshotProcessingError
+from notte_core.profiling import profiler
 from notte_core.utils.url import is_valid_url
 from notte_sdk.types import (
     DEFAULT_HEADLESS_VIEWPORT_HEIGHT,
@@ -23,7 +24,6 @@ from notte_sdk.types import (
     SessionStartRequest,
 )
 from patchright.async_api import CDPSession, Locator, Page
-from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydantic import BaseModel, Field
 from typing_extensions import override
 
@@ -33,6 +33,7 @@ from notte_browser.errors import (
     EmptyPageContentError,
     InvalidURLError,
     PageLoadingError,
+    PlaywrightTimeoutError,
     RemoteDebuggingNotAvailableError,
     UnexpectedBrowserError,
 )
@@ -119,8 +120,8 @@ class BrowserWindowOptions(BaseModel):
             chrome_args=request.chrome_args,
             viewport_height=request.viewport_height,
             viewport_width=request.viewport_width,
+            cdp_url=request.cdp_url,
             web_security=config.web_security,
-            cdp_url=config.cdp_url,
             debug_port=config.debug_port,
             custom_devtools_frontend=config.custom_devtools_frontend,
         )
@@ -193,6 +194,7 @@ class BrowserWindow(BaseModel):
     def tabs(self) -> list[Page]:
         return self.page.context.pages
 
+    @profiler.profiled()
     async def long_wait(self) -> None:
         start_time = time.time()
         try:
@@ -205,6 +207,7 @@ class BrowserWindow(BaseModel):
         if config.verbose:
             logger.trace(f"Waited for networkidle state for '{self.page.url}' in {time.time() - start_time:.2f}s")
 
+    @profiler.profiled()
     async def short_wait(self) -> None:
         await self.page.wait_for_timeout(config.wait_short_ms)
 
@@ -216,6 +219,7 @@ class BrowserWindow(BaseModel):
             url=page.url,
         )
 
+    @profiler.profiled()
     async def snapshot_metadata(self) -> SnapshotMetadata:
         return SnapshotMetadata(
             title=await self.page.title(),
@@ -231,6 +235,7 @@ class BrowserWindow(BaseModel):
             tabs=[await self.tab_metadata(i) for i, _ in enumerate(self.tabs)],
         )
 
+    @profiler.profiled()
     async def screenshot(self, retries: int = config.empty_page_max_retry) -> bytes:
         if retries <= 0:
             raise EmptyPageContentError(url=self.page.url, nb_retries=config.empty_page_max_retry)
@@ -243,19 +248,27 @@ class BrowserWindow(BaseModel):
             await self.short_wait()
             return await self.screenshot(retries=retries - 1)
 
+    async def a11y(self) -> A11yTree | None:
+        a11y_simple: A11yNode | None = await profiler.profiled()(self.page.accessibility.snapshot)()  # type: ignore[attr-defined]
+        a11y_raw: A11yNode | None = await profiler.profiled()(self.page.accessibility.snapshot)(interesting_only=False)  # type: ignore[attr-defined]
+        if a11y_simple is None or a11y_raw is None or len(a11y_simple.get("children", [])) == 0:
+            logger.warning("A11y tree is empty, this might cause unforeseen issues")
+            return None
+        return A11yTree(
+            simple=a11y_simple,
+            raw=a11y_raw,
+        )
+
+    @profiler.profiled()
     async def snapshot(
         self, screenshot: bool | None = None, retries: int = config.empty_page_max_retry
     ) -> BrowserSnapshot:
         if retries <= 0:
             raise EmptyPageContentError(url=self.page.url, nb_retries=config.empty_page_max_retry)
         html_content: str = ""
-        a11y_simple: A11yNode | None = None
-        a11y_raw: A11yNode | None = None
         dom_node: DomNode | None = None
         try:
-            html_content = await self.page.content()
-            a11y_simple = await self.page.accessibility.snapshot()  # type: ignore[attr-defined]
-            a11y_raw = await self.page.accessibility.snapshot(interesting_only=False)  # type: ignore[attr-defined]
+            html_content = await profiler.profiled()(self.page.content)()
             dom_node = await ParseDomTreePipe.forward(self.page)
 
         except SnapshotProcessingError:
@@ -271,16 +284,6 @@ class BrowserWindow(BaseModel):
             else:
                 raise UnexpectedBrowserError(url=self.page.url) from e
 
-        a11y_tree = None
-        if a11y_simple is None or a11y_raw is None or len(a11y_simple.get("children", [])) == 0:
-            logger.warning("A11y tree is empty, this might cause unforeseen issues")
-
-        else:
-            a11y_tree = A11yTree(
-                simple=a11y_simple,
-                raw=a11y_raw,
-            )
-
         if dom_node is None:
             if config.verbose:
                 logger.warning(f"Empty page content for {self.page.url}. Retry in {config.wait_retry_snapshot_ms}ms")
@@ -291,7 +294,7 @@ class BrowserWindow(BaseModel):
         return BrowserSnapshot(
             metadata=await self.snapshot_metadata(),
             html_content=html_content,
-            a11y_tree=a11y_tree,
+            a11y_tree=None,
             dom_node=dom_node,
             screenshot=snapshot_screenshot,
         )

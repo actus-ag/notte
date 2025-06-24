@@ -2,6 +2,8 @@ from loguru import logger
 from notte_core.browser.dom_tree import DomNode, NodeSelectors
 from patchright.async_api import FrameLocator, Locator, Page
 
+from notte_browser.errors import InvalidLocatorRuntimeError
+
 
 async def locale_element_in_iframes(page: Page, selectors: NodeSelectors) -> FrameLocator | Page:
     if not selectors.in_iframe:
@@ -20,18 +22,19 @@ async def locale_element_in_iframes(page: Page, selectors: NodeSelectors) -> Fra
 
 async def locate_element(page: Page, selectors: NodeSelectors) -> Locator:
     frame: Page | FrameLocator = page
+
     if selectors.in_iframe:
         frame = await locale_element_in_iframes(page, selectors)
     # regular case, locate element + scroll into view if needed
 
-    for selector in [f"css={selectors.css_selector}", f"xpath={selectors.xpath_selector}"]:
+    for selector in selectors.selectors():
         locator = frame.locator(selector)
         count = await locator.count()
         if count > 1:
             logger.debug(f"Found {count} elements for '{selector}'. Check out the dom tree for more details.")
         elif count == 1:
             return locator
-    raise ValueError(
+    raise InvalidLocatorRuntimeError(
         f"No locator is available for xpath='{selectors.xpath_selector}' or css='{selectors.css_selector}'"
     )
 

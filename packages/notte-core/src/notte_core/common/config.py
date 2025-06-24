@@ -148,6 +148,7 @@ class NotteConfigDict(TypedDict, total=False):
     nb_retries: int
     clip_tokens: int
     use_llamux: bool
+    temperature: float
 
     # [browser]
     headless: bool
@@ -186,7 +187,6 @@ class NotteConfigDict(TypedDict, total=False):
     # [agent]
     max_steps: int
     max_actions_per_step: int
-    human_in_the_loop: bool
     use_vision: bool
 
     # [dom_parsing]
@@ -201,6 +201,9 @@ class NotteConfigDict(TypedDict, total=False):
     wait_retry_snapshot_ms: int
     wait_short_ms: int
     empty_page_max_retry: int
+
+    # [misc]
+    enable_profiling: bool
 
 
 class TomlConfig(BaseModel):
@@ -248,6 +251,7 @@ class NotteConfig(TomlConfig):
     nb_retries: int
     clip_tokens: int
     use_llamux: bool
+    temperature: float
 
     # [browser]
     headless: bool
@@ -286,7 +290,6 @@ class NotteConfig(TomlConfig):
     # [agent]
     max_steps: int
     max_actions_per_step: int
-    human_in_the_loop: bool
     use_vision: bool
 
     # [dom_parsing]
@@ -301,6 +304,9 @@ class NotteConfig(TomlConfig):
     wait_retry_snapshot_ms: int
     wait_short_ms: int
     empty_page_max_retry: int
+
+    # [misc]
+    enable_profiling: bool
 
     @override
     def model_post_init(self, context: Any, /) -> None:

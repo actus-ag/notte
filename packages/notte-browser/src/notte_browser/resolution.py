@@ -13,12 +13,14 @@ from notte_core.browser.dom_tree import DomNode, InteractionDomNode, NodeSelecto
 from notte_core.browser.snapshot import BrowserSnapshot
 from notte_core.credentials.types import get_str_value
 from notte_core.errors.actions import InputActionShouldHaveOneParameterError, InvalidActionError
+from notte_core.profiling import profiler
 
 from notte_browser.dom.locate import selectors_through_shadow_dom
 from notte_browser.errors import FailedNodeResolutionError, NoSnapshotObservedError
 
 
 class NodeResolutionPipe:
+    @profiler.profiled()
     @staticmethod
     def forward(
         action: BaseAction,
@@ -40,6 +42,9 @@ class NodeResolutionPipe:
 
         if not isinstance(action, InteractionAction):
             raise InvalidActionError("unknown", f"action is not an interaction action: {action.type}")
+        if len(action.id) == 0 and action.selector is not None:
+            # skip resolution
+            return action
         # resolve selector
         selector_map: dict[str, InteractionDomNode] = {inode.id: inode for inode in snapshot.interaction_nodes()}
         if action.id not in selector_map:

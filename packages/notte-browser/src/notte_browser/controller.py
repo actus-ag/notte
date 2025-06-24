@@ -7,10 +7,12 @@ from notte_core.actions import (
     CompletionAction,
     FallbackFillAction,
     FillAction,
+    FormFillAction,
     GoBackAction,
     GoForwardAction,
     GotoAction,
     GotoNewTabAction,
+    HelpAction,
     InteractionAction,
     MultiFactorFillAction,
     PressKeyAction,
@@ -25,6 +27,7 @@ from notte_core.actions import (
 from notte_core.common.config import config
 from notte_core.credentials.types import get_str_value
 from notte_core.errors.actions import ActionExecutionError
+from notte_core.profiling import profiler
 from notte_core.utils.code import text_contains_tabs
 from notte_core.utils.platform import platform_control_key
 from patchright.async_api import Locator
@@ -33,6 +36,7 @@ from typing_extensions import final
 from notte_browser.captcha import CaptchaHandler
 from notte_browser.dom.locate import locate_element
 from notte_browser.errors import capture_playwright_errors
+from notte_browser.form_filling import FormFiller
 from notte_browser.window import BrowserWindow
 
 
@@ -40,8 +44,6 @@ from notte_browser.window import BrowserWindow
 class BrowserController:
     def __init__(self, verbose: bool = False) -> None:
         self.verbose: bool = verbose
-
-        self.execute = capture_playwright_errors(verbose=verbose)(self.execute)  # type: ignore[reportAttributeAccessIssue]
 
     async def switch_tab(self, window: BrowserWindow, tab_index: int) -> None:
         context = window.page.context
@@ -56,8 +58,13 @@ class BrowserController:
                 f"🪦 Switched to tab {tab_index} with url: {tab_page.url} ({len(context.pages)} tabs in context)"
             )
 
+    @profiler.profiled()
     async def execute_browser_action(self, window: BrowserWindow, action: BaseAction) -> bool:
         match action:
+            case FormFillAction(value=value):
+                form_filler = FormFiller(window.page)
+                await form_filler.fill_form(value)  # pyright: ignore [reportArgumentType]
+
             case CaptchaSolveAction(captcha_type=_):
                 _ = await CaptchaHandler.handle_captchas(window, action)
             case GotoAction(url=url):
@@ -89,12 +96,11 @@ class BrowserController:
                     await window.page.mouse.wheel(delta_x=0, delta_y=amount)
                 else:
                     await window.page.keyboard.press("PageDown")
-            case ScrapeAction():
-                pass
             case _:
                 raise ValueError(f"Unsupported action type: {type(action)}")
         return True
 
+    @profiler.profiled()
     async def execute_interaction_action(self, window: BrowserWindow, action: InteractionAction) -> bool:
         if action.selector is None:
             raise ValueError(f"Selector is required for {action.name()}")
@@ -155,7 +161,7 @@ class BrowserController:
                     await window.page.wait_for_timeout(100)
             case FallbackFillAction(value=value):
                 await locator.click()
-                await locator.press_sequentially(get_str_value(value))
+                await locator.press_sequentially(get_str_value(value), delay=100)
                 await window.short_wait()
             case CheckAction(value=value):
                 if value:
@@ -173,7 +179,6 @@ class BrowserController:
                         _ = await locator.click()
                     except Exception as e:
                         raise ActionExecutionError("select_dropdown", "", reason="Invalid selector") from e
-
             case _:
                 raise ValueError(f"Unsupported action type: {type(action)}")
         if press_enter:
@@ -188,6 +193,8 @@ class BrowserController:
 
         return True
 
+    @profiler.profiled()
+    @capture_playwright_errors()
     async def execute(self, window: BrowserWindow, action: BaseAction) -> bool:
         context = window.page.context
         num_pages = len(context.pages)
@@ -200,6 +207,14 @@ class BrowserController:
                     logger.info(
                         f"Completion action: status={'success' if success else 'failure'} with answer = {answer}"
                     )
+            case ScrapeAction():
+                if self.verbose:
+                    logger.info("Scrape action should not be executed inside the controller")
+                pass
+            case HelpAction():
+                if self.verbose:
+                    logger.info("Help action should not be executed inside the controller")
+                pass
             case _:
                 retval = await self.execute_browser_action(window, action)
         # add short wait before we check for new tabs to make sure that

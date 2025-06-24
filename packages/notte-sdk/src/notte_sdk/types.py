@@ -12,6 +12,7 @@ from notte_core.actions import (
     ActionUnion,
     BaseAction,
     BrowserAction,
+    InteractionAction,
     StepAction,
 )
 from notte_core.browser.observation import Observation, StepResult
@@ -419,6 +420,7 @@ class SessionStartRequestDict(TypedDict, total=False):
     chrome_args: list[str] | None
     viewport_width: int | None
     viewport_height: int | None
+    cdp_url: str | None
 
 
 class SessionRequestDict(TypedDict, total=False):
@@ -456,6 +458,10 @@ class SessionStartRequest(SdkBaseModel):
     viewport_width: Annotated[int | None, Field(description="The width of the viewport")] = DEFAULT_VIEWPORT_WIDTH
     viewport_height: Annotated[int | None, Field(description="The height of the viewport")] = DEFAULT_VIEWPORT_HEIGHT
 
+    cdp_url: Annotated[str | None, Field(description="The CDP URL of another remote session provider.")] = (
+        config.cdp_url
+    )
+
     @field_validator("timeout_minutes")
     @classmethod
     def validate_timeout_minutes(cls, value: int) -> int:
@@ -473,6 +479,41 @@ class SessionStartRequest(SdkBaseModel):
                 )
             )
         return value
+
+    @model_validator(mode="after")
+    def validate_cdp_url_constraints(self) -> "SessionStartRequest":
+        """
+        Validate that when cdp_url is provided, certain fields are set to their default values.
+
+        Raises:
+            ValueError: If cdp_url is provided but other fields are not set to defaults.
+        """
+        if self.cdp_url is not None:
+            if self.solve_captchas:
+                raise ValueError(
+                    "When cdp_url is provided, solve_captchas must be set to False. Set the solve_captchas with your external session CDP provider."
+                )
+            if self.proxies is not False:
+                raise ValueError(
+                    "When cdp_url is provided, proxies must be set to False. Set the proxies with your external session CDP provider."
+                )
+            if self.user_agent is not None:
+                raise ValueError(
+                    "When cdp_url is provided, user_agent must be None. Set the user agent with your external session CDP provider."
+                )
+            if self.chrome_args is not None:
+                raise ValueError(
+                    "When cdp_url is provided, chrome_args must be None. Set the chrome arguments with your external session CDP provider."
+                )
+            if self.viewport_width is not None and self.viewport_width != DEFAULT_VIEWPORT_WIDTH:
+                raise ValueError(
+                    "When cdp_url is provided, viewport_width must be None. Set the viewport width with your external session CDP provider."
+                )
+            if self.viewport_height is not None and self.viewport_height != DEFAULT_VIEWPORT_HEIGHT:
+                raise ValueError(
+                    "When cdp_url is provided, viewport_height must be None. Set the viewport height with your external session CDP provider."
+                )
+        return self
 
     @property
     def playwright_proxy(self) -> PlaywrightProxySettings | None:
@@ -567,6 +608,7 @@ class SessionResponse(SdkBaseModel):
         ),
     ] = False
     browser_type: BrowserType = BrowserType.CHROMIUM
+    cdp_url: Annotated[str | None, Field(description="The CDP URL of the session")] = None
 
     @field_validator("closed_at", mode="before")
     @classmethod
@@ -602,6 +644,7 @@ class SessionResponseDict(TypedDict, total=False):
     error: str | None
     proxies: bool
     browser_type: BrowserType
+    cdp_url: str | None
 
 
 # ############################################################
@@ -1070,6 +1113,7 @@ class StepRequestDict(PaginationParamsDict, total=False):
     action_id: str | None
     value: str | int | None
     enter: bool | None
+    selector: str | None
     action: StepAction | ActionUnion | None
 
 
@@ -1082,6 +1126,10 @@ class StepRequest(PaginationParams):
     enter: Annotated[
         bool | None,
         Field(description="Whether to press enter after inputting the value"),
+    ] = None
+
+    selector: Annotated[
+        str | None, Field(description="The dom selector to use to find the element to interact with")
     ] = None
 
     action: Annotated[StepAction | ActionUnion | None, Field(description="The action to execute")] = None
@@ -1106,8 +1154,10 @@ class StepRequest(PaginationParams):
                     value=value,
                     press_enter=self.enter,
                 )
-            elif BrowserAction.validate_type(self.type):
+            elif self.type in BrowserAction.BROWSER_ACTION_REGISTRY:
                 self.action = BrowserAction.from_param(self.type, self.value)
+            elif self.type in InteractionAction.INTERACTION_ACTION_REGISTRY:
+                self.action = InteractionAction.from_param(self.type, self.value, self.selector)
             else:
                 raise ValueError(
                     f"Invalid action type: {self.type}. Valid types are: {BrowserAction.ACTION_REGISTRY.keys()}"
@@ -1188,7 +1238,7 @@ class AgentStartRequestDict(AgentCreateRequestDict, AgentRunRequestDict, total=F
     pass
 
 
-class AgentCreateRequest(SessionRequest):
+class _AgentCreateRequest(SessionRequest):
     reasoning_model: Annotated[LlmModel | str, Field(description="The reasoning model to use")] = Field(
         default_factory=LlmModel.default
     )
@@ -1201,6 +1251,8 @@ class AgentCreateRequest(SessionRequest):
     vault_id: Annotated[str | None, Field(description="The vault to use for the agent")] = None
     notifier_config: Annotated[dict[str, Any] | None, Field(description="Config used for the notifier")] = None
 
+
+class AgentCreateRequest(_AgentCreateRequest):
     @field_validator("reasoning_model")
     @classmethod
     def validate_reasoning_model(cls, value: LlmModel) -> LlmModel:
@@ -1313,6 +1365,7 @@ def render_agent_status(
     goal_eval: str,
     memory: str,
     next_goal: str,
+    interaction_str: str,
     action_str: str,
     colors: bool = True,
 ) -> list[tuple[str, dict[str, str]]]:
@@ -1341,6 +1394,7 @@ def render_agent_status(
         ),
         (surround_tags("🧠 Memory:") + " {memory}", dict(memory=memory)),
         (surround_tags("🎯 Next goal:") + " {goal}", dict(goal=next_goal)),
+        (surround_tags("🆔 Relevant ids:") + "{interaction_str}", dict(interaction_str=interaction_str)),
         (surround_tags("⚡ Taking action:") + "\n{action_str}", dict(action_str=action_str)),
     ]
     return to_log

@@ -37,6 +37,7 @@ from notte_core.errors.provider import (
 )
 from notte_core.errors.provider import RateLimitError as NotteRateLimitError
 from notte_core.llms.logging import trace_llm_usage
+from notte_core.profiling import profiler
 
 TResponseFormat = TypeVar("TResponseFormat", bound=BaseModel)
 
@@ -63,6 +64,7 @@ class LLMEngine:
     def context_length(self) -> int:
         return LlmModel.get_provider(self.model).context_length
 
+    @profiler.profiled()
     async def structured_completion(
         self,
         messages: list[AllMessageValues],
@@ -121,11 +123,12 @@ class LLMEngine:
             f"Error parsing LLM response into Structured Output (type: {response_format}). Content: \n\n{content}\n\n"
         )
 
+    @profiler.profiled()
     async def single_completion(
         self,
         messages: list[AllMessageValues],
         model: str | None = None,
-        temperature: float = 0.0,
+        temperature: float = config.temperature,
         response_format: dict[str, str] | type[BaseModel] | None = None,
     ) -> str:
         model = model or self.model
@@ -138,11 +141,12 @@ class LLMEngine:
         )
         return response.choices[0].message.content  # pyright: ignore [reportReturnType, reportUnknownVariableType, reportUnknownMemberType, reportAttributeAccessIssue]
 
+    @profiler.profiled()
     async def completion(
         self,
         messages: list[AllMessageValues],
         model: str | None = None,
-        temperature: float = 0.0,
+        temperature: float = config.temperature,
         response_format: dict[str, str] | type[BaseModel] | None = None,
         n: int = 1,
     ) -> ModelResponse:
@@ -154,6 +158,7 @@ class LLMEngine:
                 temperature=temperature,
                 n=n,
                 response_format=response_format,
+                max_completion_tokens=8192,
             )
             # Cast to ModelResponse since we know it's not streaming in this case
             return cast(ModelResponse, response)
